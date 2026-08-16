@@ -42,6 +42,7 @@
            border-radius: 8px; padding: 7px 14px; cursor: pointer; font-size: 13px; }
   button:hover { border-color: var(--accent); }
   button.primary { background: var(--accent); color: #1a1a10; border-color: var(--accent); font-weight: 600; }
+  button.danger { color: var(--red); }
   button:disabled { opacity: .5; cursor: not-allowed; }
   input[type=number] { background: var(--card2); color: var(--text); border: 1px solid var(--border);
                        border-radius: 8px; padding: 6px 10px; width: 90px; font-size: 13px; }
@@ -68,6 +69,16 @@
   .dev:last-child { border-bottom: none; }
   .dev .info { flex: 1; min-width: 0; }
   .dev .name { font-weight: 600; }
+  .operation { display: none; align-items: center; gap: 10px; margin-top: 12px; padding: 10px 12px;
+               border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+               border-radius: 9px; background: color-mix(in srgb, var(--accent) 8%, var(--card2)); }
+  .spinner { width: 17px; height: 17px; flex: 0 0 auto; border: 2px solid var(--border);
+             border-top-color: var(--accent); border-radius: 50%; animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .cap-note { margin-top: 10px; padding: 9px 10px; border-radius: 8px; background: var(--card2);
+              color: var(--muted); font-size: 11.5px; }
+  .device-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .device-heading button { padding: 4px 9px; text-transform: none; letter-spacing: 0; }
 </style>
 </head>
 <body>
@@ -75,6 +86,7 @@
   <span class="logo">🎵</span>
   <h1>WakeUpMarshall</h1>
   <span class="chip"><span id="adapter-dot" class="dot"></span><span id="adapter-text">读取中…</span></span>
+  <span class="chip" id="operation-chip" style="display:none"><span class="spinner"></span><span id="operation-chip-text"></span></span>
   <span class="chip muted" id="ver"></span>
 </header>
 
@@ -99,6 +111,13 @@
     <div class="row"><span>下次唤醒</span><span class="mono" id="next-run">—</span></div>
     <div class="row"><span>最近一次唤醒</span><span id="last-wake">—</span></div>
     <div class="row"><span>执行结果</span><span id="last-result"><span class="badge gray">—</span></span></div>
+    <div class="operation" id="operation-panel">
+      <span class="spinner"></span>
+      <div>
+        <div id="operation-title" style="font-weight:600">正在执行</div>
+        <div class="muted" id="operation-detail"></div>
+      </div>
+    </div>
     <div class="actions">
       <button class="primary" id="wake-now">⚡ 立即唤醒</button>
       <button id="rescan">↻ 重新扫描</button>
@@ -107,10 +126,15 @@
 
   <!-- bluetooth -->
   <div class="card">
-    <h2>蓝牙与设备</h2>
+    <h2 class="device-heading">
+      <span>蓝牙与设备</span>
+      <button id="toggle-all-devices">显示全部设备</button>
+    </h2>
     <div class="kv"><span class="muted">适配器</span><span class="mono" id="adapter-addr">—</span></div>
-    <div class="kv"><span class="muted">设备总数</span><span id="dev-count">0</span></div>
+    <div class="kv"><span class="muted">已绑定设备</span><span id="saved-count">0</span></div>
+    <div class="kv"><span class="muted">当前显示</span><span id="dev-count">0</span></div>
     <div id="devices" style="margin-top:4px"></div>
+    <div class="cap-note" id="capability-note"></div>
   </div>
 
   <!-- history -->
@@ -147,10 +171,14 @@ const RESULT = {
 };
 const MODE = { auto: "自动", manual: "手动" };
 let statusCache = null;
+let showAllDevices = false;
+let devicesRenderKey = "";
 
 async function api(path, opts) {
   const res = await fetch(path, opts);
-  return res.json();
+  const payload = await res.json();
+  if (!res.ok) throw new Error(payload.error || `请求失败 (${res.status})`);
+  return payload;
 }
 
 function fmtTime(iso) {
@@ -173,7 +201,8 @@ function renderStatus(st) {
   const dot = document.getElementById("adapter-dot");
   const txt = document.getElementById("adapter-text");
   const addr = document.getElementById("adapter-addr");
-  if (!st.adapter.present) { dot.className = "dot bad"; txt.textContent = "无蓝牙适配器"; }
+  if (!st.adapter.checked) { dot.className = "dot warn"; txt.textContent = "蓝牙状态待检测"; }
+  else if (!st.adapter.present) { dot.className = "dot bad"; txt.textContent = "无蓝牙适配器"; }
   else if (st.adapter.powered) { dot.className = "dot ok"; txt.textContent = "蓝牙已开启"; }
   else { dot.className = "dot bad"; txt.textContent = "蓝牙已关闭"; }
   addr.textContent = st.adapter.address || (st.adapter.name || "—");
@@ -190,32 +219,94 @@ function renderStatus(st) {
   document.getElementById("last-result").innerHTML =
     `<span class="badge ${r[1]}">${r[0]}</span>`;
 
+  const operation = s.operation || {};
+  const operationActive = s.working && operation.phase !== "idle";
+  const operationName = operation.kind === "scan" ? "正在扫描" : "正在唤醒";
+  const progress = operation.total
+    ? `（${operation.current || 0}/${operation.total}）`
+    : "";
+  const operationPanel = document.getElementById("operation-panel");
+  const operationChip = document.getElementById("operation-chip");
+  operationPanel.style.display = operationActive ? "flex" : "none";
+  operationChip.style.display = operationActive ? "inline-flex" : "none";
+  document.getElementById("operation-title").textContent = operationName + progress;
+  document.getElementById("operation-detail").textContent = operation.detail || "正在处理蓝牙请求";
+  document.getElementById("operation-chip-text").textContent = operationName;
+
   document.getElementById("wake-now").disabled = s.working;
   document.getElementById("rescan").disabled = s.working;
+  document.getElementById("wake-now").textContent =
+    s.working && operation.kind === "wake" ? "⚡ 唤醒中…" : "⚡ 立即唤醒";
+  document.getElementById("rescan").textContent =
+    s.working && operation.kind === "scan" ? "↻ 扫描中…" : "↻ 重新扫描";
 
   // devices
   const box = document.getElementById("devices");
-  document.getElementById("dev-count").textContent = st.devices.length;
-  if (!st.devices.length) {
-    box.innerHTML = `<div class="muted" style="padding:6px 0">暂无设备（点击“重新扫描”）</div>`;
-  } else {
-    box.innerHTML = st.devices.map(d => `
-      <div class="dev">
-        <span class="dot ${d.connected ? "ok" : "gray"}"></span>
-        <div class="info">
-          <div class="name">${esc(d.name) || "(未命名)"}</div>
-          <div class="mono muted">${d.address}</div>
-        </div>
-        ${d.connected ? '<span class="badge green">已连接</span>' : ""}
-        ${d.paired ? '<span class="badge blue">已配对</span>' : ""}
-      </div>`).join("");
+  const visible = showAllDevices
+    ? st.devices
+    : st.devices.filter(d => d.saved || d.is_marshall);
+  document.getElementById("saved-count").textContent = st.saved_device_count || 0;
+  document.getElementById("dev-count").textContent =
+    showAllDevices ? `${visible.length} / ${st.devices.length}` : `${visible.length}`;
+  document.getElementById("toggle-all-devices").textContent =
+    showAllDevices ? "仅显示 Marshall" : "显示全部设备";
+  const nextRenderKey = JSON.stringify([showAllDevices, visible]);
+  if (nextRenderKey !== devicesRenderKey) {
+    devicesRenderKey = nextRenderKey;
+    if (!visible.length) {
+      box.innerHTML = `<div class="muted" style="padding:6px 0">暂无设备（点击“重新扫描”）</div>`;
+    } else {
+      box.innerHTML = visible.map(d => `
+        <div class="dev">
+          <span class="dot ${d.connected ? "ok" : d.discovered ? "warn" : "gray"}"></span>
+          <div class="info">
+            <div class="name">${esc(d.name) || "(未命名)"}</div>
+            <div class="mono muted">${esc(d.address)}</div>
+            <div class="muted">${deviceStatusText(d)}</div>
+          </div>
+          ${d.audio_state === "active" ? '<span class="badge green">正在输出音频</span>' : ""}
+          ${d.audio_state === "pending" || d.audio_state === "broadcasting" ? '<span class="badge orange">音频流待接管</span>' : ""}
+          ${d.saved ? '<span class="badge blue">已绑定</span>' : ""}
+          ${d.is_marshall ? '<span class="badge orange">Marshall</span>' : ""}
+          ${d.connected ? '<span class="badge green">已连接</span>' : ""}
+          ${d.paired ? '<span class="badge blue">已配对</span>' : ""}
+          ${d.is_marshall && !d.saved && d.discovered
+            ? `<button data-action="bind" data-address="${escAttr(d.address)}">绑定</button>`
+            : ""}
+          ${d.saved
+            ? `<button class="danger" data-action="unbind" data-address="${escAttr(d.address)}">删除</button>`
+            : ""}
+        </div>`).join("");
+    }
   }
+
+  const capabilities = st.capabilities || {};
+  const connectionText = capabilities.connection_state
+    ? "连接状态每 5 秒刷新"
+    : "连接状态仅在扫描/唤醒时更新";
+  const audioText = capabilities.audio_state
+    ? "Linux BlueZ A2DP 音频流状态可实时读取"
+    : "此后端无法读取 A2DP 音频流";
+  document.getElementById("capability-note").textContent =
+    `${connectionText}；${audioText}。蓝牙无法可靠区分休眠、关机、离线或超出范围。`;
 }
 
 function esc(s) {
   return String(s).replace(/[&<>"']/g, c => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
   }[c]));
+}
+
+function escAttr(s) {
+  return esc(s).replace(/`/g, "&#96;");
+}
+
+function deviceStatusText(device) {
+  const seen = device.last_seen ? `最近发现：${fmtTime(device.last_seen)}` : "尚未发现";
+  if (device.connected) return `已建立蓝牙连接 · ${seen}`;
+  if (device.discovered) return `本次扫描可见 · ${seen}`;
+  if (device.saved) return `已保存但当前不可见；可能休眠、关机、离线或超出范围 · ${seen}`;
+  return seen;
 }
 
 async function refreshStatus() {
@@ -269,15 +360,61 @@ document.getElementById("save-interval").addEventListener("click", async () => {
 });
 
 document.getElementById("wake-now").addEventListener("click", async () => {
-  toast("唤醒请求已发出…");
-  await api("/api/wake", { method: "POST" });
-  setTimeout(refreshStatus, 1500);
+  try {
+    const data = await api("/api/wake", { method: "POST" });
+    renderQueuedOperation(data.operation);
+    toast("唤醒请求已发出");
+    refreshStatus();
+  } catch (error) {
+    toast(error.message);
+  }
 });
 
 document.getElementById("rescan").addEventListener("click", async () => {
-  toast("扫描中…");
-  await api("/api/scan", { method: "POST" });
-  setTimeout(refreshStatus, 2000);
+  try {
+    const data = await api("/api/scan", { method: "POST" });
+    renderQueuedOperation(data.operation);
+    toast("扫描请求已发出");
+    refreshStatus();
+  } catch (error) {
+    toast(error.message);
+  }
+});
+
+function renderQueuedOperation(operation) {
+  if (!statusCache) return;
+  statusCache.scheduler.working = true;
+  statusCache.scheduler.operation = operation;
+  renderStatus(statusCache);
+}
+
+document.getElementById("toggle-all-devices").addEventListener("click", () => {
+  showAllDevices = !showAllDevices;
+  if (statusCache) renderStatus(statusCache);
+});
+
+document.getElementById("devices").addEventListener("click", async event => {
+  const button = event.target.closest("button[data-action]");
+  if (!button) return;
+  const address = button.dataset.address;
+  button.disabled = true;
+  try {
+    if (button.dataset.action === "bind") {
+      await api("/api/devices/bind", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ address }),
+      });
+      toast("设备已绑定，后续唤醒将直接连接");
+    } else if (confirm("确定删除该设备的绑定信息？")) {
+      await api(`/api/devices/${encodeURIComponent(address)}`, { method: "DELETE" });
+      toast("绑定已删除，可重新扫描并绑定");
+    }
+    await refreshStatus();
+  } catch (error) {
+    toast(error.message);
+    button.disabled = false;
+  }
 });
 
 document.getElementById("refresh-history").addEventListener("click", refreshHistory);
@@ -291,7 +428,7 @@ document.getElementById("clear-history").addEventListener("click", async () => {
 // ---- boot ----
 refreshStatus();
 refreshHistory();
-setInterval(refreshStatus, 3000);
+setInterval(refreshStatus, 1500);
 </script>
 </body>
 </html>

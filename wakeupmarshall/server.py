@@ -6,6 +6,8 @@ Serves the minimal UI (``web/index.html``) and a small JSON API:
     GET  /api/status        -> adapter / devices / scheduler / last wake
     POST /api/wake          -> trigger a manual wake round (async)
     POST /api/scan          -> trigger a manual scan (async)
+    POST /api/devices/bind  -> persist a discovered Marshall device
+    DELETE /api/devices/:id -> remove a saved device
     GET  /api/settings      -> current settings
     PUT  /api/settings      -> update settings (enabled, interval_minutes, ...)
     GET  /api/history       -> wake history (newest first)
@@ -20,7 +22,7 @@ import mimetypes
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Dict
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from . import __version__
 from .config import Settings
@@ -63,9 +65,12 @@ class ApiHandler(BaseHTTPRequestHandler):
         if length <= 0:
             return {}
         try:
-            return json.loads(self.rfile.read(length).decode("utf-8"))
-        except Exception:
-            return {}
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError("Request body must contain valid JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("Request body must be a JSON object")
+        return payload
 
     def log_message(self, fmt: str, *args) -> None:  # quieter access log
         log.debug(fmt % args)
@@ -88,33 +93,51 @@ class ApiHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/wake":
-            self.server.scheduler.trigger_wake(manual=True)
-            self._send_json({"started": True})
+            started = self.server.scheduler.trigger_wake(manual=True)
+            self._send_json(
+                {
+                    "started": started,
+                    "operation": self.server.scheduler.status()["scheduler"]["operation"],
+                    **({} if started else {"error": "Another Bluetooth operation is already running"}),
+                },
+                202 if started else 409,
+            )
         elif parsed.path == "/api/scan":
-            self.server.scheduler.trigger_scan()
-            self._send_json({"started": True})
+            started = self.server.scheduler.trigger_scan()
+            self._send_json(
+                {
+                    "started": started,
+                    "operation": self.server.scheduler.status()["scheduler"]["operation"],
+                    **({} if started else {"error": "Another Bluetooth operation is already running"}),
+                },
+                202 if started else 409,
+            )
+        elif parsed.path == "/api/devices/bind":
+            try:
+                data = self._read_json()
+                address = str(data.get("address") or "").strip()
+                if not address:
+                    raise ValueError("Device address is required")
+                device = self.server.scheduler.bind_device(address)
+            except KeyError as exc:
+                self._send_json({"error": str(exc.args[0])}, 404)
+                return
+            except ValueError as exc:
+                self._send_json({"error": str(exc)}, 400)
+                return
+            self._send_json({"device": device})
         else:
             self._send_json({"error": "not found"}, 404)
 
     def do_PUT(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/api/settings":
-            data = self._read_json()
-            s = self.server.scheduler.settings
-            if "enabled" in data:
-                s.enabled = bool(data["enabled"])
-            if "interval_minutes" in data:
-                s.interval_minutes = int(data["interval_minutes"])
-            if "scan_timeout" in data:
-                s.scan_timeout = int(data["scan_timeout"])
-            if "connect_timeout" in data:
-                s.connect_timeout = int(data["connect_timeout"])
-            if "port" in data:
-                s.port = int(data["port"])
-            if "keywords" in data and isinstance(data["keywords"], list):
-                s.keywords = [str(k) for k in data["keywords"]]
-            s.clamp()
-            self.server.scheduler.update_settings(s)
+            try:
+                data = self._read_json()
+                self.server.scheduler.patch_settings(data)
+            except (TypeError, ValueError) as exc:
+                self._send_json({"error": str(exc)}, 400)
+                return
             self._send_json(self._settings_payload())
         else:
             self._send_json({"error": "not found"}, 404)
@@ -124,6 +147,14 @@ class ApiHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/history":
             self.server.scheduler.clear_history()
             self._send_json({"cleared": True})
+        elif parsed.path.startswith("/api/devices/"):
+            address = unquote(parsed.path.removeprefix("/api/devices/")).strip()
+            if not address:
+                self._send_json({"error": "Device address is required"}, 400)
+            elif self.server.scheduler.unbind_device(address):
+                self._send_json({"deleted": True})
+            else:
+                self._send_json({"error": "Saved device not found"}, 404)
         else:
             self._send_json({"error": "not found"}, 404)
 

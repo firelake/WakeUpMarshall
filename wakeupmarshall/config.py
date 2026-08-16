@@ -11,6 +11,7 @@ The module is deliberately dependency-free (stdlib only).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 from dataclasses import asdict, dataclass, field
@@ -22,6 +23,9 @@ MIN_INTERVAL_MINUTES = 1
 MAX_INTERVAL_MINUTES = 24 * 60
 DEFAULT_KEYWORDS = ["woburn", "marshall"]
 MAX_HISTORY_ENTRIES = 500
+MAX_SAVED_DEVICES = 100
+
+log = logging.getLogger("wakeupmarshall.config")
 
 
 def default_data_dir() -> Path:
@@ -64,6 +68,7 @@ class ConfigStore:
         self.data_dir = Path(data_dir) if data_dir else default_data_dir()
         self.settings_file = self.data_dir / "settings.json"
         self.history_file = self.data_dir / "history.json"
+        self.devices_file = self.data_dir / "devices.json"
         self._lock = threading.RLock()
 
     # -- settings ---------------------------------------------------------
@@ -109,6 +114,55 @@ class ConfigStore:
         with self._lock:
             if self.history_file.exists():
                 self.history_file.unlink()
+
+    # -- saved devices ----------------------------------------------------
+    def load_devices(self) -> List[Dict[str, str]]:
+        with self._lock:
+            if not self.devices_file.exists():
+                return []
+            try:
+                raw = json.loads(self.devices_file.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                log.warning("Cannot load saved devices from %s: %s", self.devices_file, exc)
+                return []
+            if not isinstance(raw, list):
+                log.warning("Ignoring invalid saved-device data in %s", self.devices_file)
+                return []
+            return self._normalize_devices(raw)
+
+    def save_devices(self, devices: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        normalized = self._normalize_devices(devices)
+        with self._lock:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            self._atomic_write(
+                self.devices_file,
+                json.dumps(normalized, indent=2, ensure_ascii=False),
+            )
+        return normalized
+
+    @staticmethod
+    def _normalize_devices(devices: List[Dict[str, Any]]) -> List[Dict[str, str]]:
+        normalized: List[Dict[str, str]] = []
+        seen = set()
+        for item in devices:
+            if not isinstance(item, dict):
+                continue
+            address = str(item.get("address") or "").strip()
+            key = address.casefold()
+            if not address or key in seen:
+                continue
+            seen.add(key)
+            normalized.append(
+                {
+                    "address": address,
+                    "name": str(item.get("name") or "").strip(),
+                    "bound_at": str(item.get("bound_at") or "").strip(),
+                    "last_seen": str(item.get("last_seen") or "").strip(),
+                }
+            )
+            if len(normalized) >= MAX_SAVED_DEVICES:
+                break
+        return normalized
 
     # -- helpers ----------------------------------------------------------
     @staticmethod
