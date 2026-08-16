@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wakeupmarshall"
-version = "0.1.0"
+version = "0.2.0"
 description = "Auto-discover and wake Marshall Bluetooth speakers (e.g. Woburn III) on a schedule, with a minimal web UI"
 readme = "README.md"
 requires-python = ">=3.9"

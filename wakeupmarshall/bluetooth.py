@@ -15,14 +15,14 @@ Three backends implement the same tiny interface:
 from __future__ import annotations
 
 import asyncio
-import platform
 import re
 import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass, field
-from typing import Callable, List, Optional, Tuple
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
+from typing import Dict, List, Optional, Tuple
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -37,6 +37,7 @@ class AdapterInfo:
     powered: bool = False
     name: str = ""
     address: str = ""
+    checked: bool = False
 
 
 @dataclass
@@ -47,8 +48,22 @@ class Device:
     paired: bool = False
     trusted: bool = False
     last_seen: str = ""
+    saved: bool = False
+    is_marshall: bool = False
+    discovered: bool = True
+    bound_at: str = ""
+    audio_state: str = "unsupported"
+    status_updated_at: str = ""
 
     def to_dict(self) -> dict:
+        if self.audio_state in ("active", "pending", "broadcasting"):
+            status = "playing"
+        elif self.connected:
+            status = "connected"
+        elif self.discovered:
+            status = "available"
+        else:
+            status = "unknown"
         return {
             "address": self.address,
             "name": self.name,
@@ -56,6 +71,13 @@ class Device:
             "paired": self.paired,
             "trusted": self.trusted,
             "last_seen": self.last_seen,
+            "saved": self.saved,
+            "is_marshall": self.is_marshall,
+            "discovered": self.discovered,
+            "bound_at": self.bound_at,
+            "audio_state": self.audio_state,
+            "status_updated_at": self.status_updated_at,
+            "status": status,
         }
 
 
@@ -71,6 +93,20 @@ class BaseBackend:
     def connect(self, device: Device, timeout: int = 25) -> Tuple[bool, str]:
         """Try to (re)connect to the device; connecting wakes it from sleep."""
         raise NotImplementedError
+
+    def refresh(self, devices: List[Device]) -> List[Device]:
+        """Refresh state without discovery when the platform supports it."""
+        return devices
+
+    def capabilities(self) -> dict:
+        return {
+            "connection_state": False,
+            "presence_state": "scan",
+            "sleep_state": False,
+            "audio_state": False,
+            "adapter_status_requires_scan": False,
+            "direct_connect": False,
+        }
 
 
 def matches_keywords(name: str, keywords: List[str]) -> bool:
@@ -114,7 +150,7 @@ class LinuxBluetoothctlBackend(BaseBackend):
     # -- interface --------------------------------------------------------
     def adapter_status(self) -> AdapterInfo:
         code, out = self._run(["show"], timeout=10)
-        info = AdapterInfo()
+        info = AdapterInfo(checked=True)
         info.present = code == 0
         for line in out.splitlines():
             line = strip_ansi(line).strip()
@@ -139,11 +175,16 @@ class LinuxBluetoothctlBackend(BaseBackend):
                 continue
             for line in out.splitlines():
                 line = strip_ansi(line)
-                m = re.search(r"\[NEW\]\s+Device\s+([0-9A-Fa-f:]{17})(?:\s+(.*))?$", line)
+                m = re.search(
+                    r"\[(?:NEW|CHG)\]\s+Device\s+([0-9A-Fa-f:]{17})(?:\s+(.*))?$",
+                    line,
+                )
                 if not m:
                     continue
                 addr = m.group(1).upper()
                 name = (m.group(2) or "").strip()
+                if name.startswith(("RSSI:", "TxPower:", "ManufacturerData")):
+                    name = ""
                 name = re.sub(r"\s*\[(LE|BR/EDR)\]$", "", name).strip()
                 if addr not in found or not found[addr].name:
                     found[addr] = Device(address=addr, name=name)
@@ -152,6 +193,8 @@ class LinuxBluetoothctlBackend(BaseBackend):
         return self.refresh(devices)
 
     def refresh(self, devices: List[Device]) -> List[Device]:
+        audio_states = self._media_transport_states()
+        updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
         for dev in devices:
             info = self._device_info(dev.address)
             if info:
@@ -160,7 +203,21 @@ class LinuxBluetoothctlBackend(BaseBackend):
                 dev.trusted = info.trusted
                 if info.name:
                     dev.name = info.name
+            dev.audio_state = (
+                "unsupported" if audio_states is None else audio_states.get(dev.address.upper(), "unknown")
+            )
+            dev.status_updated_at = updated_at
         return devices
+
+    def capabilities(self) -> dict:
+        return {
+            "connection_state": True,
+            "presence_state": "scan",
+            "sleep_state": False,
+            "audio_state": shutil.which("busctl") is not None,
+            "adapter_status_requires_scan": False,
+            "direct_connect": True,
+        }
 
     def _device_info(self, address: str) -> Optional[Device]:
         code, out = self._run(["info", address], timeout=10)
@@ -181,6 +238,65 @@ class LinuxBluetoothctlBackend(BaseBackend):
             elif line.startswith("Trusted:"):
                 dev.trusted = line.split(":", 1)[1].strip().lower() == "yes"
         return dev
+
+    def _media_transport_states(self) -> Optional[Dict[str, str]]:
+        """Read BlueZ A2DP transport state when systemd's busctl is available."""
+        busctl = shutil.which("busctl")
+        if not busctl:
+            return None
+        try:
+            tree = subprocess.run(
+                [busctl, "--system", "--no-pager", "tree", "org.bluez"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if tree.returncode != 0:
+            return None
+
+        paths = set(
+            re.findall(
+                r"(/org/bluez/\S*dev_(?:[0-9A-Fa-f]{2}_){5}"
+                r"[0-9A-Fa-f]{2}/\S+/fd\d+)$",
+                tree.stdout or "",
+                flags=re.MULTILINE,
+            )
+        )
+        states: Dict[str, str] = {}
+        priority = {"idle": 0, "pending": 1, "broadcasting": 1, "active": 2}
+        for path in paths:
+            try:
+                result = subprocess.run(
+                    [
+                        busctl,
+                        "--system",
+                        "get-property",
+                        "org.bluez",
+                        path,
+                        "org.bluez.MediaTransport1",
+                        "State",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                continue
+            if result.returncode != 0:
+                continue
+            match = re.search(r'"(idle|pending|broadcasting|active)"', result.stdout or "")
+            address_match = re.search(
+                r"/dev_((?:[0-9A-Fa-f]{2}_){5}[0-9A-Fa-f]{2})(?:/|$)", path
+            )
+            if not match or not address_match:
+                continue
+            address = address_match.group(1).replace("_", ":").upper()
+            state = match.group(1)
+            if priority[state] >= priority.get(states.get(address, ""), -1):
+                states[address] = state
+        return states
 
     def connect(self, device: Device, timeout: int = 25) -> Tuple[bool, str]:
         code, out = self._run(["connect", device.address], timeout=timeout + 5)
@@ -205,6 +321,7 @@ class BleakBackend(BaseBackend):
     def __init__(self) -> None:
         try:
             from bleak import BleakClient, BleakScanner  # noqa: F401
+            from bleak.backends.device import BLEDevice
         except Exception as exc:  # pragma: no cover - depends on env
             raise RuntimeError(
                 "The 'bleak' package is required for this backend. "
@@ -212,9 +329,10 @@ class BleakBackend(BaseBackend):
             )
         self._BleakScanner = BleakScanner
         self._BleakClient = BleakClient
+        self._BLEDevice = BLEDevice
 
     def adapter_status(self) -> AdapterInfo:
-        info = AdapterInfo()
+        info = AdapterInfo(checked=True)
         try:
             devices = asyncio.run(self._scan(1.5))
             info.present = True
@@ -232,8 +350,16 @@ class BleakBackend(BaseBackend):
     async def _scan(self, timeout: float) -> List[Device]:
         found = await self._BleakScanner.discover(timeout=timeout, return_adv=True)
         devices: List[Device] = []
-        for addr, adv in found.items():
-            name = getattr(adv, "local_name", None) or ""
+        for addr, result in found.items():
+            if isinstance(result, tuple):
+                ble_device, adv = result
+            else:  # compatibility with older bleak releases
+                ble_device, adv = None, result
+            name = (
+                getattr(adv, "local_name", None)
+                or getattr(ble_device, "name", None)
+                or ""
+            )
             devices.append(Device(address=addr.upper(), name=name))
         return devices
 
@@ -242,7 +368,29 @@ class BleakBackend(BaseBackend):
 
     def connect(self, device: Device, timeout: int = 25) -> Tuple[bool, str]:
         async def _connect() -> Tuple[bool, str]:
-            client = self._BleakClient(device.address, timeout=timeout)
+            target = device.address
+            if sys.platform.startswith("win"):
+                try:
+                    bluetooth_address = int(
+                        device.address.replace(":", "").replace("-", ""),
+                        16,
+                    )
+                except ValueError:
+                    return False, f"Invalid Bluetooth address: {device.address}"
+                # Supplying a BLEDevice prevents Bleak's WinRT backend from
+                # running find_device_by_address() before connecting. The
+                # compatibility details support Bleak 0.21 through 3.x.
+                details = SimpleNamespace(
+                    adv=SimpleNamespace(bluetooth_address=bluetooth_address),
+                    scan=None,
+                )
+                target = self._BLEDevice(
+                    device.address,
+                    device.name or None,
+                    details,
+                    rssi=0,
+                )
+            client = self._BleakClient(target, timeout=timeout)
             try:
                 await client.connect()
                 return True, "Connected (BLE)"
@@ -255,6 +403,16 @@ class BleakBackend(BaseBackend):
                     pass
 
         return asyncio.run(_connect())
+
+    def capabilities(self) -> dict:
+        return {
+            "connection_state": False,
+            "presence_state": "scan",
+            "sleep_state": False,
+            "audio_state": False,
+            "adapter_status_requires_scan": True,
+            "direct_connect": sys.platform.startswith("win"),
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -277,22 +435,62 @@ class FakeBackend(BaseBackend):
         ]
         self._connect_succeeds = connect_succeeds
         self.connect_calls: List[str] = []
+        self.scan_calls = 0
 
     def adapter_status(self) -> AdapterInfo:
-        return AdapterInfo(present=True, powered=self._adapter_powered, name="Fake adapter", address="00:00:00:00:00:00")
+        return AdapterInfo(
+            present=True,
+            powered=self._adapter_powered,
+            name="Fake adapter",
+            address="00:00:00:00:00:00",
+            checked=True,
+        )
 
     def scan(self, timeout: int = 15) -> List[Device]:
+        self.scan_calls += 1
         now = time.strftime("%Y-%m-%dT%H:%M:%S")
         for dev in self._devices:
             dev.last_seen = now
-        return [Device(**d.to_dict()) for d in self._devices]
+            dev.discovered = True
+            dev.status_updated_at = now
+        return [replace(d) for d in self._devices]
 
     def connect(self, device: Device, timeout: int = 25) -> Tuple[bool, str]:
         self.connect_calls.append(device.address)
         if self._connect_succeeds:
             device.connected = True
+            device.status_updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+            for known in self._devices:
+                if known.address.casefold() == device.address.casefold():
+                    known.connected = True
             return True, "Connection successful"
         return False, "Failed to connect (fake)"
+
+    def refresh(self, devices: List[Device]) -> List[Device]:
+        known = {d.address.casefold(): d for d in self._devices}
+        updated_at = time.strftime("%Y-%m-%dT%H:%M:%S")
+        result: List[Device] = []
+        for device in devices:
+            refreshed = replace(device)
+            current = known.get(device.address.casefold())
+            if current:
+                refreshed.connected = current.connected
+                refreshed.paired = current.paired
+                refreshed.trusted = current.trusted
+                refreshed.audio_state = current.audio_state
+            refreshed.status_updated_at = updated_at
+            result.append(refreshed)
+        return result
+
+    def capabilities(self) -> dict:
+        return {
+            "connection_state": True,
+            "presence_state": "scan",
+            "sleep_state": False,
+            "audio_state": False,
+            "adapter_status_requires_scan": False,
+            "direct_connect": True,
+        }
 
 
 def get_backend(name: str = "auto", fake_kwargs: Optional[dict] = None) -> BaseBackend:

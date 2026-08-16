@@ -4,7 +4,10 @@
 自动把它从休眠状态唤醒，并提供一个**简约的本地 Web 界面**：
 
 - 当前机器的**蓝牙状态**（适配器是否开启）
-- 发现/正在管理的**蓝牙设备**及连接、配对状态
+- 扫描并**绑定 Marshall 音箱**；绑定信息在本机重启应用后仍保留
+- 后续手动/自动唤醒直接连接已绑定设备，不必先重新扫描
+- 默认仅显示 Marshall/已绑定设备，可按需展开全部扫描结果
+- 显示扫描、唤醒的执行阶段，以及连接、可发现和 Linux A2DP 音频流状态
 - **一键开关**定时唤醒，可调唤醒间隔
 - 显示**最近一次唤醒时间与执行结果**
 - **唤醒历史**查看与清空
@@ -69,13 +72,21 @@ wakeupmarshall serve          # 启动调度器 + Web UI（默认 http://127.0.0
 
 ## ⚙️ 工作原理
 
-1. 后台调度线程每 N 分钟（默认 10）执行一轮 **扫描 + 唤醒**：
+1. 首次使用时在 Web UI 点击**重新扫描**，找到 Marshall 音箱后点击**绑定**。绑定记录写入本机数据目录。
+2. 后台调度线程每 N 分钟（默认 10）执行一轮唤醒：
    - 读取适配器状态（`bluetoothctl show` / bleak）
-   - 执行扫描（Linux 同时跑 `scan on` 与 `scan bredr`，兼容仅经典/仅 LE 广播的音箱）
-   - 按名称关键字（默认 `woburn`、`marshall`）匹配设备
-   - 对每个匹配设备执行**连接**（`bluetoothctl connect` / BLE connect）——连接动作即把休眠中的音箱唤醒
-2. 每轮结果写入历史（`~/.wakeupmarshall/history.json`，最多保留 500 条）。
-3. Web 界面每 3 秒轮询 `/api/status` 展示实时状态。
+   - 已有绑定设备时，按保存的设备地址直接执行**连接**（`bluetoothctl connect` / BLE connect），不扫描
+   - 没有绑定设备时，保留三轮扫描和名称匹配作为兼容回退
+3. 每轮结果写入历史（`~/.wakeupmarshall/history.json`，最多保留 500 条）。
+4. Web 界面每 1.5 秒轮询 `/api/status` 展示执行阶段和设备状态。
+
+### 设备状态能力
+
+- **连接状态**：Linux/BlueZ 可通过 `org.bluez.Device1.Connected`（由 `bluetoothctl info` 暴露）定期刷新。
+- **正在输出音频**：Linux 且系统提供 `busctl` 时，可读取 BlueZ `org.bluez.MediaTransport1.State`；`active` 显示为正在输出音频。Windows 使用的 Bleak 仅支持 BLE/GATT，无法读取 Bluetooth Classic A2DP 状态。
+- **休眠/激活**：通用蓝牙接口没有设备电源或休眠属性。设备不可见/连接失败也可能表示关机、离线或超出范围，因此界面不会把不可达误报为“休眠”。
+
+参考：[BlueZ Device API](https://manpages.ubuntu.com/manpages/noble/man5/org.bluez.Device.5.html)、[BlueZ MediaTransport API](https://man.archlinux.org/man/extra/bluez-utils/org.bluez.MediaTransport.5.en)、[Bleak 文档](https://bleak.readthedocs.io/en/latest/)。
 
 ## 🔌 HTTP API
 
@@ -85,6 +96,8 @@ wakeupmarshall serve          # 启动调度器 + Web UI（默认 http://127.0.0
 | GET | `/api/status` | 适配器 / 设备 / 调度器 / 最近唤醒 |
 | POST | `/api/wake` | 立即唤醒（异步） |
 | POST | `/api/scan` | 立即扫描（异步） |
+| POST | `/api/devices/bind` | 绑定最近扫描发现的 Marshall 设备（JSON：`address`） |
+| DELETE | `/api/devices/{address}` | 删除已保存的设备绑定 |
 | GET | `/api/settings` | 读取设置 |
 | PUT | `/api/settings` | 更新设置（`enabled`、`interval_minutes`、`scan_timeout`…） |
 | GET | `/api/history` | 唤醒历史（最新在前） |
@@ -94,6 +107,7 @@ wakeupmarshall serve          # 启动调度器 + Web UI（默认 http://127.0.0
 
 - `settings.json` — 设置（开关、间隔、关键字、端口、后端）
 - `history.json` — 唤醒历史
+- `devices.json` — 已绑定设备的地址、名称、绑定时间和最近发现时间
 - `app/` — 源码（安装脚本克隆）
 - `venv/` — Python 虚拟环境
 - `server.log` — 运行日志（非 systemd 时）
