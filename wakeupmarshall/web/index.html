@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WakeUpMarshall</title>
+<style>
+  :root {
+    --bg: #101014; --card: #1a1a21; --card2: #22222b; --border: #2e2e3a;
+    --text: #e8e8ee; --muted: #8a8a99; --accent: #ffb454; --green: #3ddc84;
+    --blue: #5ab0ff; --red: #ff6b6b; --orange: #ffa94d; --gray: #6c6c78;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: var(--bg); color: var(--text);
+         font: 14px/1.5 "Segoe UI", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+         padding: 20px; max-width: 980px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 18px; flex-wrap: wrap; }
+  h1 { font-size: 20px; font-weight: 600; }
+  .logo { font-size: 22px; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
+          border-radius: 999px; font-size: 12px; border: 1px solid var(--border); background: var(--card2); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gray); }
+  .dot.ok { background: var(--green); } .dot.bad { background: var(--red); } .dot.warn { background: var(--orange); }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 760px) { .grid { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px; }
+  .card h2 { font-size: 14px; color: var(--muted); font-weight: 600; margin-bottom: 12px;
+             text-transform: uppercase; letter-spacing: .04em; }
+  .card.wide { grid-column: 1 / -1; }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 10px;
+         padding: 8px 0; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+  .row:last-child { border-bottom: none; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .mono { font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 12px; }
+  .badge { padding: 2px 8px; border-radius: 6px; font-size: 11px; border: 1px solid var(--border); background: var(--card2); }
+  .badge.green { color: var(--green); border-color: var(--green); }
+  .badge.blue  { color: var(--blue);  border-color: var(--blue); }
+  .badge.red   { color: var(--red);   border-color: var(--red); }
+  .badge.orange{ color: var(--orange);border-color: var(--orange); }
+  .badge.gray  { color: var(--gray);  border-color: var(--gray); }
+  button { background: var(--card2); color: var(--text); border: 1px solid var(--border);
+           border-radius: 8px; padding: 7px 14px; cursor: pointer; font-size: 13px; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: #1a1a10; border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  input[type=number] { background: var(--card2); color: var(--text); border: 1px solid var(--border);
+                       border-radius: 8px; padding: 6px 10px; width: 90px; font-size: 13px; }
+  /* toggle switch */
+  .switch { position: relative; display: inline-block; width: 44px; height: 24px; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider { position: absolute; inset: 0; background: var(--gray); border-radius: 24px;
+            transition: .2s; cursor: pointer; }
+  .slider::before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px;
+                    background: #fff; border-radius: 50%; transition: .2s; }
+  .switch input:checked + .slider { background: var(--accent); }
+  .switch input:checked + .slider::before { transform: translateX(20px); }
+  .actions { display: flex; gap: 10px; margin-top: 14px; flex-wrap: wrap; }
+  table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  .empty { color: var(--muted); text-align: center; padding: 18px 0; }
+  .kv { display: flex; justify-content: space-between; padding: 7px 0; border-bottom: 1px solid var(--border); gap: 10px; }
+  .kv:last-child { border-bottom: none; }
+  #toast { position: fixed; bottom: 18px; left: 50%; transform: translateX(-50%);
+           background: var(--card2); border: 1px solid var(--border); padding: 9px 16px;
+           border-radius: 10px; display: none; z-index: 9; font-size: 13px; }
+  .dev { display: flex; align-items: center; gap: 8px; padding: 9px 0; border-bottom: 1px solid var(--border); }
+  .dev:last-child { border-bottom: none; }
+  .dev .info { flex: 1; min-width: 0; }
+  .dev .name { font-weight: 600; }
+</style>
+</head>
+<body>
+<header>
+  <span class="logo">🎵</span>
+  <h1>WakeUpMarshall</h1>
+  <span class="chip"><span id="adapter-dot" class="dot"></span><span id="adapter-text">读取中…</span></span>
+  <span class="chip muted" id="ver"></span>
+</header>
+
+<div class="grid">
+  <!-- scheduler -->
+  <div class="card">
+    <h2>定时唤醒</h2>
+    <div class="row">
+      <span>定时唤醒</span>
+      <label class="switch">
+        <input type="checkbox" id="enabled">
+        <span class="slider"></span>
+      </label>
+    </div>
+    <div class="row">
+      <span>唤醒间隔（分钟）</span>
+      <div style="display:flex;gap:8px;align-items:center">
+        <input type="number" id="interval" min="1" max="1440" step="1">
+        <button id="save-interval">保存</button>
+      </div>
+    </div>
+    <div class="row"><span>下次唤醒</span><span class="mono" id="next-run">—</span></div>
+    <div class="row"><span>最近一次唤醒</span><span id="last-wake">—</span></div>
+    <div class="row"><span>执行结果</span><span id="last-result"><span class="badge gray">—</span></span></div>
+    <div class="actions">
+      <button class="primary" id="wake-now">⚡ 立即唤醒</button>
+      <button id="rescan">↻ 重新扫描</button>
+    </div>
+  </div>
+
+  <!-- bluetooth -->
+  <div class="card">
+    <h2>蓝牙与设备</h2>
+    <div class="kv"><span class="muted">适配器</span><span class="mono" id="adapter-addr">—</span></div>
+    <div class="kv"><span class="muted">设备总数</span><span id="dev-count">0</span></div>
+    <div id="devices" style="margin-top:4px"></div>
+  </div>
+
+  <!-- history -->
+  <div class="card wide">
+    <h2 style="display:flex;justify-content:space-between;align-items:center">
+      <span>唤醒历史</span>
+      <span>
+        <button id="refresh-history" style="margin-right:6px">刷新</button>
+        <button id="clear-history">清空</button>
+      </span>
+    </h2>
+    <div style="overflow-x:auto">
+      <table>
+        <thead><tr><th>时间</th><th>模式</th><th>结果</th><th>耗时</th><th>详情</th></tr></thead>
+        <tbody id="history-body"></tbody>
+      </table>
+    </div>
+    <div id="history-empty" class="empty" style="display:none">暂无历史记录</div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+"use strict";
+const RESULT = {
+  success:        ["成功", "green"],
+  already_awake:  ["已唤醒", "blue"],
+  failed:         ["失败", "red"],
+  no_device:      ["未发现设备", "orange"],
+  error:          ["错误", "red"],
+  skipped:        ["跳过", "gray"],
+  scan:           ["扫描", "gray"],
+};
+const MODE = { auto: "自动", manual: "手动" };
+let statusCache = null;
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  return res.json();
+}
+
+function fmtTime(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  return isNaN(d) ? iso : d.toLocaleString("zh-CN", { hour12: false });
+}
+
+function toast(msg) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.style.display = "block";
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", 2200);
+}
+
+function renderStatus(st) {
+  statusCache = st;
+  document.getElementById("ver").textContent = "v" + st.version;
+
+  // adapter
+  const dot = document.getElementById("adapter-dot");
+  const txt = document.getElementById("adapter-text");
+  const addr = document.getElementById("adapter-addr");
+  if (!st.adapter.present) { dot.className = "dot bad"; txt.textContent = "无蓝牙适配器"; }
+  else if (st.adapter.powered) { dot.className = "dot ok"; txt.textContent = "蓝牙已开启"; }
+  else { dot.className = "dot bad"; txt.textContent = "蓝牙已关闭"; }
+  addr.textContent = st.adapter.address || (st.adapter.name || "—");
+
+  // scheduler
+  const s = st.scheduler;
+  document.getElementById("enabled").checked = s.enabled;
+  document.getElementById("interval").value = s.interval_minutes;
+  document.getElementById("next-run").textContent = fmtTime(s.next_run);
+
+  const lw = s.last_wake;
+  document.getElementById("last-wake").textContent = lw ? fmtTime(lw.ts) : "—";
+  const r = lw ? (RESULT[lw.result] || [lw.result, "gray"]) : ["—", "gray"];
+  document.getElementById("last-result").innerHTML =
+    `<span class="badge ${r[1]}">${r[0]}</span>`;
+
+  document.getElementById("wake-now").disabled = s.working;
+  document.getElementById("rescan").disabled = s.working;
+
+  // devices
+  const box = document.getElementById("devices");
+  document.getElementById("dev-count").textContent = st.devices.length;
+  if (!st.devices.length) {
+    box.innerHTML = `<div class="muted" style="padding:6px 0">暂无设备（点击“重新扫描”）</div>`;
+  } else {
+    box.innerHTML = st.devices.map(d => `
+      <div class="dev">
+        <span class="dot ${d.connected ? "ok" : "gray"}"></span>
+        <div class="info">
+          <div class="name">${esc(d.name) || "(未命名)"}</div>
+          <div class="mono muted">${d.address}</div>
+        </div>
+        ${d.connected ? '<span class="badge green">已连接</span>' : ""}
+        ${d.paired ? '<span class="badge blue">已配对</span>' : ""}
+      </div>`).join("");
+  }
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  }[c]));
+}
+
+async function refreshStatus() {
+  try {
+    const st = await api("/api/status");
+    renderStatus(st);
+  } catch (e) { /* server may be restarting */ }
+}
+
+async function refreshHistory() {
+  try {
+    const data = await api("/api/history");
+    const body = document.getElementById("history-body");
+    const empty = document.getElementById("history-empty");
+    const rows = data.history || [];
+    body.innerHTML = "";
+    empty.style.display = rows.length ? "none" : "block";
+    rows.forEach(h => {
+      const r = RESULT[h.result] || [h.result, "gray"];
+      const tr = document.createElement("tr");
+      tr.innerHTML = `
+        <td class="muted">${fmtTime(h.ts)}</td>
+        <td>${MODE[h.mode] || h.mode}${h.action === "scan" ? " / 扫描" : ""}</td>
+        <td><span class="badge ${r[1]}">${r[0]}</span></td>
+        <td class="muted">${h.duration_ms ? h.duration_ms + " ms" : "—"}</td>
+        <td>${esc(h.detail || "")}</td>`;
+      body.appendChild(tr);
+    });
+  } catch (e) {}
+}
+
+// ---- events ----
+document.getElementById("enabled").addEventListener("change", async (e) => {
+  await api("/api/settings", {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ enabled: e.target.checked })
+  });
+  toast(e.target.checked ? "定时唤醒已开启" : "定时唤醒已关闭");
+  refreshStatus();
+});
+
+document.getElementById("save-interval").addEventListener("click", async () => {
+  const v = parseInt(document.getElementById("interval").value, 10);
+  if (!v || v < 1) { toast("间隔至少为 1 分钟"); return; }
+  await api("/api/settings", {
+    method: "PUT", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ interval_minutes: v })
+  });
+  toast("唤醒间隔已更新");
+  refreshStatus();
+});
+
+document.getElementById("wake-now").addEventListener("click", async () => {
+  toast("唤醒请求已发出…");
+  await api("/api/wake", { method: "POST" });
+  setTimeout(refreshStatus, 1500);
+});
+
+document.getElementById("rescan").addEventListener("click", async () => {
+  toast("扫描中…");
+  await api("/api/scan", { method: "POST" });
+  setTimeout(refreshStatus, 2000);
+});
+
+document.getElementById("refresh-history").addEventListener("click", refreshHistory);
+document.getElementById("clear-history").addEventListener("click", async () => {
+  if (!confirm("确定清空全部历史记录？")) return;
+  await api("/api/history", { method: "DELETE" });
+  toast("历史已清空");
+  refreshHistory();
+});
+
+// ---- boot ----
+refreshStatus();
+refreshHistory();
+setInterval(refreshStatus, 3000);
+</script>
+</body>
+</html>

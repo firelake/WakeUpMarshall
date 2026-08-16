@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wakeupmarshall"
+version = "0.1.0"
+description = "Auto-discover and wake Marshall Bluetooth speakers (e.g. Woburn III) on a schedule, with a minimal web UI"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "WakeUpMarshall Contributors" }]
+keywords = ["bluetooth", "marshall", "woburn", "wake", "speaker", "automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Hardware",
+]
+dependencies = [
+    "bleak>=0.21",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+wakeupmarshall = "wakeupmarshall.cli:main"
+
+[tool.setuptools]
+packages = ["wakeupmarshall"]
+
+[tool.setuptools.package-data]
+wakeupmarshall = ["web/*.html", "web/*.css", "web/*.js"]
